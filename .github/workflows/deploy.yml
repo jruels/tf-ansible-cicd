@@ -140,6 +140,12 @@ jobs:
           # Run the Docker installation playbook
           ansible-playbook -i aws_ec2.yml docker.yml --private-key ~/.ssh/id_rsa -v
 
+      - name: Wait for services to be ready
+        run: |
+          echo "⏰ Waiting for Docker and SSH services to be fully ready..."
+          sleep 60
+          echo "✅ Wait period completed"
+
   build-and-deploy-app:
     name: Build and Deploy Application
     runs-on: ubuntu-latest
@@ -160,7 +166,12 @@ jobs:
           mkdir -p ~/.ssh
           echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
-          ssh-keyscan -H ${{ steps.get-ip.outputs.master_ip }} >> ~/.ssh/known_hosts 2>/dev/null || true
+          
+          MASTER_IP="${{ steps.get-ip.outputs.master_ip }}"
+          echo "Setting up SSH for master instance: $MASTER_IP"
+          
+          # Add host to known_hosts (disable host key checking for simplicity)
+          ssh-keyscan -H $MASTER_IP >> ~/.ssh/known_hosts 2>/dev/null || true
 
       - name: Create sample application
         run: |
@@ -208,16 +219,29 @@ jobs:
           EOF
           fi
 
+      - name: Test SSH connection
+        run: |
+          MASTER_IP="${{ steps.get-ip.outputs.master_ip }}"
+          echo "Testing SSH connection to ubuntu@$MASTER_IP..."
+          
+          # Simple SSH test with timeout
+          ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no -o ConnectTimeout=30 ubuntu@$MASTER_IP "echo 'SSH connection successful'"
+
       - name: Build and deploy application
         run: |
+          MASTER_IP="${{ steps.get-ip.outputs.master_ip }}"
+          echo "Deploying application to ubuntu@$MASTER_IP..."
+          
           # Replace $(date) with actual date in index.html
           sed -i "s/\$(date)/$(date)/" index.html
           
           # Copy application files to remote server
-          scp -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no Dockerfile index.html ubuntu@${{ steps.get-ip.outputs.master_ip }}:~/
+          echo "Copying application files..."
+          scp -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no Dockerfile index.html ubuntu@$MASTER_IP:~/
           
           # Build and run the application on remote server
-          ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no ubuntu@${{ steps.get-ip.outputs.master_ip }} << 'EOF'
+          echo "Building and deploying Docker application..."
+          ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no ubuntu@$MASTER_IP << 'EOF'
             # Stop and remove existing container if it exists
             docker stop demo-app 2>/dev/null || true
             docker rm demo-app 2>/dev/null || true
