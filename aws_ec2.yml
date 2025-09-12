@@ -6,5 +6,11 @@ filters:
 keyed_groups:
   - key: tags['role']
     prefix: tag_role
+    separator: "_"
+  - key: tags['Name']
+    prefix: name
+    separator: "_"
 hostnames:
   - ip-address
+compose:
+  ansible_host: public_ip_address

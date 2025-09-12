@@ -43,10 +43,13 @@ module "vpc" {
   public_subnets  = [for i in range(local.az_count) : "10.0.${i + 1}.0/24"]
   private_subnets = [for i in range(local.az_count) : "10.0.${i + 101}.0/24"]
 
-  enable_nat_gateway = true
-  enable_vpn_gateway = false
+  enable_nat_gateway   = true
+  enable_vpn_gateway   = false
   enable_dns_hostnames = true
-  enable_dns_support = true
+  enable_dns_support   = true
+  
+  # Ensure public subnets auto-assign public IPs
+  map_public_ip_on_launch = true
 
   tags = {
     Name = "k8s-vpc"
@@ -98,13 +101,14 @@ values = ["hvm"]
 
 ##Create k8s Master Instance
 resource "aws_instance" "aws-k8s-master" {
-  subnet_id              = module.vpc.public_subnets[0]
-  depends_on             = [aws_security_group.k8s_sg]
-  ami                    = data.aws_ami.ubuntu.id
-  instance_type          = var.aws_instance_size
-  vpc_security_group_ids = [aws_security_group.k8s_sg.id]
-  key_name               = var.aws_key_name
-  count                  = var.aws_master_count
+  subnet_id                   = module.vpc.public_subnets[0]
+  depends_on                  = [aws_security_group.k8s_sg]
+  ami                         = data.aws_ami.ubuntu.id
+  instance_type               = var.aws_instance_size
+  vpc_security_group_ids      = [aws_security_group.k8s_sg.id]
+  key_name                    = var.aws_key_name
+  count                       = var.aws_master_count
+  associate_public_ip_address = true
   root_block_device {
     volume_type           = "gp2"
     volume_size           = 20
@@ -118,13 +122,14 @@ resource "aws_instance" "aws-k8s-master" {
 
 ##Create AWS k8s Workers
 resource "aws_instance" "k8s-members" {
-  subnet_id              = module.vpc.public_subnets[0]
-  depends_on             = [aws_security_group.k8s_sg]
-  ami                    = data.aws_ami.ubuntu.id
-  instance_type          = var.aws_instance_size
-  vpc_security_group_ids = [aws_security_group.k8s_sg.id]
-  key_name               = var.aws_key_name
-  count                  = var.aws_worker_count
+  subnet_id                   = module.vpc.public_subnets[0]
+  depends_on                  = [aws_security_group.k8s_sg]
+  ami                         = data.aws_ami.ubuntu.id
+  instance_type               = var.aws_instance_size
+  vpc_security_group_ids      = [aws_security_group.k8s_sg.id]
+  key_name                    = var.aws_key_name
+  count                       = var.aws_worker_count
+  associate_public_ip_address = true
   root_block_device {
     volume_type           = "gp2"
     volume_size           = 20

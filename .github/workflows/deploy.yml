@@ -135,9 +135,18 @@ jobs:
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H $(echo "${{ needs.deploy-infrastructure.outputs.master_ip || needs.check-infrastructure.outputs.master_ip }}" | tr ',' '\n') >> ~/.ssh/known_hosts 2>/dev/null || true
 
+      - name: Debug Ansible inventory
+        run: |
+          echo "🔍 Debugging Ansible inventory..."
+          echo "Available hosts and groups:"
+          ansible-inventory -i aws_ec2.yml --list --yaml
+          echo ""
+          echo "Graph view:"
+          ansible-inventory -i aws_ec2.yml --graph
+
       - name: Run Ansible playbook
         run: |
-          # Run the Docker installation playbook
+          echo "🚀 Running Docker installation playbook..."
           ansible-playbook -i aws_ec2.yml docker.yml --private-key ~/.ssh/id_rsa -v
 
       - name: Wait for services to be ready

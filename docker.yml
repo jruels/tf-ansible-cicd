@@ -1,5 +1,5 @@
 - name: Install Ansible Prereqs
-  hosts: tag_role_k8s_member:tag_role_k8s_master
+  hosts: tag_role_k8s_master:tag_role_k8s_member
   remote_user: ubuntu
   gather_facts: no
   tasks:
