@@ -1,0 +1,72 @@
+- name: Install Ansible Prereqs
+  hosts: tag_role_k8s_member:tag_role_k8s_master
+  remote_user: ubuntu
+  gather_facts: no
+  tasks:
+    - raw: "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y python3-minimal python3-pip"
+
+- name: Install Docker Prereqs
+  hosts: tag_role_k8s_master:tag_role_k8s_member 
+  remote_user: ubuntu
+  gather_facts: no
+  tasks:
+    - package:
+        name: "{{item}}"
+        state: latest
+      with_items:
+        - apt-transport-https
+        - ca-certificates
+        - cgroup-tools
+        - curl
+        - software-properties-common
+        - tree
+        - unzip
+    - apt_key:
+        url: "https://download.docker.com/linux/ubuntu/gpg"
+        state: present
+    - apt_repository:
+        repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu noble stable"
+        state: present
+
+- name: Install Docker
+  hosts: tag_role_k8s_master:tag_role_k8s_member
+  remote_user: ubuntu
+  gather_facts: no
+  handlers:
+    - name: restart docker
+      service:
+        name: docker
+        state: restarted
+  tasks:
+    - package:
+        name: 
+           - docker-ce
+           - docker-ce-cli
+           - docker-buildx-plugin 
+           - docker-compose-plugin
+        state: latest
+    - user: 
+        name: "{{ ansible_ssh_user }}"
+        groups: docker
+        append: yes
+      notify: restart docker
+
+- name: Install Docker CRI
+  hosts: tag_role_k8s_master:tag_role_k8s_member
+  remote_user: ubuntu
+  become: yes
+  gather_facts: yes
+  roles:
+    - role: cri_dockerd
+  tags: 
+    - cri-docker
+#- name: Install SSH key
+#  hosts: tag_role_k8s_master:tag_role_k8s_member
+#  remote_user: ubuntu
+#  gather_facts: yes
+#  tasks:
+#    - copy:
+#        src: ~/.ssh/ansible_best.pub
+#        dest: "/home/{{ ansible_ssh_user }}/.ssh/authorized_keys"
+#        owner: "{{ ansible_ssh_user }}"
+#        mode: 0600

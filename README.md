@@ -23,14 +23,52 @@ The pipeline creates:
 2. **SSH Key Pair** for EC2 access
 3. **GitHub Repository** with Actions enabled
 
-### Required GitHub Secrets
+### Step-by-Step GitHub Actions Pipeline Setup
 
-Add the following secrets to your GitHub repository (`Settings > Secrets and variables > Actions`):
+#### Step 1: Create AWS EC2 Key Pair
+
+1. Log into the AWS Console
+2. Navigate to EC2 > Network & Security > Key Pairs
+3. Click "Create key pair"
+4. Name it (e.g., `my-k8s-key`) and choose `.pem` format
+5. Download and save the private key file securely
+6. Note the key pair name for Step 3
+
+#### Step 2: Configure AWS Credentials
+
+1. Create an IAM user with programmatic access:
+   - Go to IAM > Users > Add User
+   - Enable "Programmatic access"
+   - Attach policies: `AmazonEC2FullAccess`, `AmazonVPCFullAccess`
+   - Save the Access Key ID and Secret Access Key
+
+#### Step 3: Set GitHub Repository Secrets
+
+1. Go to your GitHub repository
+2. Navigate to `Settings > Secrets and variables > Actions`
+3. Add these repository secrets:
 
 ```
-AWS_ACCESS_KEY_ID       # Your AWS access key
-AWS_SECRET_ACCESS_KEY   # Your AWS secret key
-SSH_PRIVATE_KEY         # Private key content for EC2 access (corresponding to aws_key_name in variables.tf)
+AWS_ACCESS_KEY_ID       # Your AWS access key from Step 2
+AWS_SECRET_ACCESS_KEY   # Your AWS secret key from Step 2  
+SSH_PRIVATE_KEY         # Contents of the .pem file from Step 1 (entire file content)
+```
+
+**Important**: For `SSH_PRIVATE_KEY`, copy the entire content of your `.pem` file, including the `-----BEGIN RSA PRIVATE KEY-----` and `-----END RSA PRIVATE KEY-----` lines.
+
+#### Step 4: Configure Project Variables
+
+Edit `variables.tf` to match your AWS setup:
+```hcl
+variable "aws_key_name" {
+  description = "AWS key pair name"
+  default     = "my-k8s-key"  # Change this to your key pair name from Step 1
+}
+
+variable "aws_region" {
+  description = "AWS region"
+  default     = "us-west-1"   # Change to your preferred region
+}
 ```
 
 ### Configuration Files
@@ -76,6 +114,103 @@ The infrastructure uses the official `terraform-aws-modules/vpc/aws` module to c
 - **Customization**: Full control over CIDR blocks and subnets
 - **High Availability**: Resources distributed across multiple AZs
 - **Scalability**: Easy to add more subnets or modify network configuration
+
+## Running the Pipeline
+
+### Step 5: Trigger the Initial Deployment
+
+1. **Push to trigger pipeline**:
+   ```bash
+   git add .
+   git commit -m "Initial pipeline setup"
+   git push origin main
+   ```
+
+2. **Monitor the deployment**:
+   - Go to your GitHub repository
+   - Click on the "Actions" tab
+   - Watch the "Deploy Infrastructure and Application" workflow
+
+### Step 6: What to Expect During Initial Run
+
+The pipeline will execute these jobs in sequence:
+
+#### 🔍 **check-infrastructure** (1-2 minutes)
+- Initializes Terraform
+- Checks if AWS infrastructure already exists
+- **Expected outcome**: Since it's the first run, will report "infrastructure_exists=false"
+
+#### 🏗️ **deploy-infrastructure** (5-8 minutes)
+- Creates complete AWS VPC infrastructure
+- Provisions EC2 instances (1 master + 2 workers)
+- **Expected outcome**: 
+  - VPC with public/private subnets created
+  - Security groups configured
+  - EC2 instances launched and running
+  - Outputs master and worker IP addresses
+
+#### ⚙️ **configure-infrastructure** (3-5 minutes)
+- Installs Python and Ansible
+- Connects to EC2 instances via SSH
+- Installs Docker on all instances
+- **Expected outcome**: Docker installed and running on all nodes
+
+#### 🚀 **build-and-deploy-app** (2-3 minutes)
+- Builds Docker image with sample web application
+- Deploys to master node on port 80
+- **Expected outcome**: Application accessible at http://MASTER_IP
+
+**Total initial deployment time**: ~15-20 minutes
+
+### Step 7: Access Your Application
+
+After successful deployment:
+
+1. **Find your application URL** in the GitHub Actions logs:
+   - Look for: "Access your application at: http://[IP_ADDRESS]"
+   - Or check the `build-and-deploy-app` job output
+
+2. **Open the application**:
+   - Navigate to `http://[MASTER_IP]` in your browser
+   - You should see: "🚀 Deployment Successful!" page
+
+3. **SSH access** (if needed):
+   ```bash
+   ssh -i /path/to/your-key.pem ubuntu@[MASTER_IP]
+   ```
+
+## Updating Your Application (Subsequent Runs)
+
+### Step 8: Deploy Application Updates
+
+For subsequent deployments (after initial infrastructure is created):
+
+1. **Modify your application**:
+   - Update `index.html` for content changes
+   - Update `Dockerfile` for container changes
+
+2. **Commit and push**:
+   ```bash
+   git add .
+   git commit -m "Update application"
+   git push origin main
+   ```
+
+3. **What happens during updates**:
+   - ✅ **check-infrastructure**: Detects existing infrastructure (~1 minute)
+   - ⏭️ **deploy-infrastructure**: **SKIPPED** (infrastructure exists)
+   - ✅ **configure-infrastructure**: Updates configuration if needed (~2 minutes)
+   - ✅ **build-and-deploy-app**: Rebuilds and deploys app (~2 minutes)
+
+**Total update deployment time**: ~5-7 minutes
+
+### Step 9: Pipeline Behavior Summary
+
+| Scenario | check-infrastructure | deploy-infrastructure | configure-infrastructure | build-and-deploy-app |
+|----------|---------------------|---------------------|------------------------|-------------------|
+| **First Run** | ✅ Run | ✅ Run | ✅ Run | ✅ Run |
+| **App Update** | ✅ Run | ⏭️ Skip | ✅ Run | ✅ Run |
+| **Infrastructure Destroyed** | ✅ Run | ✅ Run | ✅ Run | ✅ Run |
 
 ## How It Works
 
@@ -141,16 +276,147 @@ The infrastructure uses the official `terraform-aws-modules/vpc/aws` module to c
 
 ## Troubleshooting
 
-### Common Issues
-1. **SSH Key Issues**: Ensure SSH_PRIVATE_KEY secret matches the AWS key pair
-2. **Terraform State**: Pipeline manages state automatically, but manual intervention may be needed for conflicts
-3. **VPC Module Issues**: 
-   - Ensure AWS provider version compatibility (>= 4.8.0)
-   - Check availability zone availability in your region
-   - Verify NAT Gateway costs if running in production
-4. **Ansible Connection**: Verify security groups allow SSH access from GitHub Actions runners
-5. **Application Not Accessible**: Check security groups allow HTTP (port 80) access
-6. **Resource Limits**: Ensure your AWS account has sufficient limits for VPC, EIPs, and NAT Gateways
+### Common Pipeline Issues
+
+#### 🔑 **SSH/Authentication Problems**
+
+**Problem**: Pipeline fails with SSH connection errors
+```
+Permission denied (publickey)
+```
+
+**Solutions**:
+1. **Verify SSH_PRIVATE_KEY secret**:
+   - Ensure it contains the complete .pem file content
+   - Include `-----BEGIN RSA PRIVATE KEY-----` and `-----END RSA PRIVATE KEY-----` lines
+   - No extra spaces or characters
+
+2. **Check AWS key pair name**:
+   - Verify `aws_key_name` in `variables.tf` matches your AWS key pair exactly
+   - Key pair must exist in the same region as deployment
+
+#### 🏗️ **Infrastructure Deployment Failures**
+
+**Problem**: `deploy-infrastructure` job fails
+```
+Error: creating EC2 Instance: UnauthorizedOperation
+```
+
+**Solutions**:
+1. **Check IAM permissions**:
+   - Ensure IAM user has `AmazonEC2FullAccess` and `AmazonVPCFullAccess`
+   - Verify AWS credentials are correct in GitHub secrets
+
+2. **Region/AZ availability**:
+   - Ensure your AWS region supports the required availability zones
+   - Some regions may not have all AZs available
+
+**Problem**: Terraform state conflicts
+```
+Error: state lock
+```
+
+**Solutions**:
+1. **Wait and retry**: Another pipeline run might be in progress
+2. **Manual state unlock** (if needed):
+   ```bash
+   terraform force-unlock [LOCK_ID]
+   ```
+
+#### ⚙️ **Ansible Configuration Issues**
+
+**Problem**: `configure-infrastructure` fails to connect
+```
+UNREACHABLE! => {"msg": "Failed to connect to the host"}
+```
+
+**Solutions**:
+1. **Wait for EC2 initialization**: Add more wait time after instance creation
+2. **Check security groups**: Ensure SSH (port 22) is allowed from 0.0.0.0/0
+3. **Verify instance state**: Instances must be in "running" state
+
+#### 🚀 **Application Deployment Issues**
+
+**Problem**: Application not accessible after deployment
+```
+Connection refused or timeout
+```
+
+**Solutions**:
+1. **Check security group**: Ensure HTTP (port 80) is allowed from 0.0.0.0/0
+2. **Verify Docker container**: SSH to instance and check `docker ps`
+3. **Check application logs**:
+   ```bash
+   ssh ubuntu@[MASTER_IP]
+   docker logs demo-app
+   ```
+
+#### 💰 **Cost-Related Issues**
+
+**Problem**: Deployment fails due to resource limits
+```
+Error: creating NAT Gateway: LimitExceeded
+```
+
+**Solutions**:
+1. **Check AWS limits**: Verify VPC, EIP, and NAT Gateway limits
+2. **Reduce worker count**: Lower `aws_worker_count` in `variables.tf`
+3. **Disable NAT Gateways** (for development):
+   ```hcl
+   enable_nat_gateway = false
+   ```
+
+### Pipeline-Specific Troubleshooting
+
+#### 🔄 **Pipeline Stuck or Won't Skip Infrastructure**
+
+**Problem**: Pipeline always runs infrastructure deployment even when resources exist
+
+**Cause**: Terraform state not properly detected
+
+**Solution**: Check if terraform state exists:
+1. Go to Actions logs
+2. Check `check-infrastructure` job output
+3. Look for `terraform show -json` results
+
+#### 🧹 **Failed Deployment Cleanup**
+
+**Problem**: Infrastructure left running after failed deployment
+
+**Solution**: The pipeline includes automatic cleanup, but you can manually destroy:
+```bash
+terraform init
+terraform destroy -auto-approve
+```
+
+#### 📋 **Debugging Pipeline Steps**
+
+1. **Enable verbose logging**: Add `-v` or `-vv` flags to Ansible commands
+2. **Check GitHub Actions logs**: Each job provides detailed output
+3. **SSH to instances** for manual debugging:
+   ```bash
+   ssh -i /path/to/key.pem ubuntu@[INSTANCE_IP]
+   ```
+
+### Manual Recovery Steps
+
+If the pipeline fails completely:
+
+1. **Check AWS Console**: Verify which resources were created
+2. **Destroy partial infrastructure**:
+   ```bash
+   terraform destroy -auto-approve
+   ```
+3. **Clear GitHub Actions cache** (if needed):
+   - Go to repository Settings > Actions > Caches
+   - Delete relevant caches
+4. **Re-run the pipeline**: Push a new commit to trigger deployment
+
+### Getting Help
+
+1. **Check logs first**: Always review the complete job logs in GitHub Actions
+2. **AWS Console**: Verify resource states and quotas
+3. **Test SSH access**: Ensure you can manually SSH to instances with your key
 
 ### Manual Cleanup
 If needed, manually destroy infrastructure:

@@ -1,0 +1,265 @@
+name: Deploy Infrastructure and Application
+
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+    branches: [ master, main ]
+
+env:
+  AWS_REGION: us-west-1
+  TF_VERSION: 1.9.0
+  ANSIBLE_VERSION: 8.0.0
+
+jobs:
+  check-infrastructure:
+    name: Check if infrastructure exists
+    runs-on: ubuntu-latest
+    outputs:
+      infrastructure_exists: ${{ steps.check.outputs.exists }}
+      master_ip: ${{ steps.terraform-output.outputs.master_ip }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Initialize Terraform
+        run: terraform init
+
+      - name: Check if infrastructure exists
+        id: check
+        run: |
+          # Check if terraform state exists and has resources
+          if terraform show -json 2>/dev/null | jq -e '.values.root_module.resources | length > 0' > /dev/null; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Get Terraform outputs (if infrastructure exists)
+        id: terraform-output
+        if: steps.check.outputs.exists == 'true'
+        run: |
+          MASTER_IP=$(terraform output -raw k8s-master-public_ips 2>/dev/null | jq -r '.[0][0]' || echo "")
+          echo "master_ip=$MASTER_IP" >> $GITHUB_OUTPUT
+
+  deploy-infrastructure:
+    name: Deploy Infrastructure
+    runs-on: ubuntu-latest
+    needs: check-infrastructure
+    if: needs.check-infrastructure.outputs.infrastructure_exists == 'false'
+    outputs:
+      master_ip: ${{ steps.terraform-output.outputs.master_ip }}
+      worker_ips: ${{ steps.terraform-output.outputs.worker_ips }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Initialize Terraform
+        run: terraform init
+
+      - name: Terraform Plan
+        run: terraform plan -out=tfplan
+
+      - name: Terraform Apply
+        run: terraform apply -auto-approve tfplan
+
+      - name: Get Terraform outputs
+        id: terraform-output
+        run: |
+          MASTER_IP=$(terraform output -raw k8s-master-public_ips | jq -r '.[0][0]')
+          WORKER_IPS=$(terraform output -raw k8s-node-public_ips | jq -r '.[0] | join(",")')
+          echo "master_ip=$MASTER_IP" >> $GITHUB_OUTPUT
+          echo "worker_ips=$WORKER_IPS" >> $GITHUB_OUTPUT
+
+      - name: Wait for instances to be ready
+        run: |
+          echo "Waiting for instances to be ready..."
+          sleep 120
+
+  configure-infrastructure:
+    name: Configure Infrastructure with Ansible
+    runs-on: ubuntu-latest
+    needs: [check-infrastructure, deploy-infrastructure]
+    if: always() && (needs.deploy-infrastructure.result == 'success' || needs.check-infrastructure.outputs.infrastructure_exists == 'true')
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install Ansible
+        run: |
+          pip install ansible==${{ env.ANSIBLE_VERSION }}
+          pip install boto3 botocore
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H $(echo "${{ needs.deploy-infrastructure.outputs.master_ip || needs.check-infrastructure.outputs.master_ip }}" | tr ',' '\n') >> ~/.ssh/known_hosts 2>/dev/null || true
+
+      - name: Run Ansible playbook
+        run: |
+          # Run the Docker installation playbook
+          ansible-playbook -i aws_ec2.yml docker.yml --private-key ~/.ssh/id_rsa -v
+
+  build-and-deploy-app:
+    name: Build and Deploy Application
+    runs-on: ubuntu-latest
+    needs: [check-infrastructure, deploy-infrastructure, configure-infrastructure]
+    if: always() && needs.configure-infrastructure.result == 'success'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Get Master IP
+        id: get-ip
+        run: |
+          MASTER_IP="${{ needs.deploy-infrastructure.outputs.master_ip || needs.check-infrastructure.outputs.master_ip }}"
+          echo "master_ip=$MASTER_IP" >> $GITHUB_OUTPUT
+
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ steps.get-ip.outputs.master_ip }} >> ~/.ssh/known_hosts 2>/dev/null || true
+
+      - name: Create sample application
+        run: |
+          # Create a simple web application if it doesn't exist
+          if [ ! -f Dockerfile ]; then
+            cat > Dockerfile << 'EOF'
+          FROM nginx:alpine
+          COPY index.html /usr/share/nginx/html/
+          EXPOSE 80
+          EOF
+          fi
+          
+          if [ ! -f index.html ]; then
+            cat > index.html << 'EOF'
+          <!DOCTYPE html>
+          <html>
+          <head>
+              <title>Terraform + Ansible + GitHub Actions Demo</title>
+              <style>
+                  body { 
+                      font-family: Arial, sans-serif; 
+                      text-align: center; 
+                      margin-top: 50px;
+                      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                      color: white;
+                  }
+                  .container { 
+                      background: rgba(255,255,255,0.1); 
+                      padding: 30px; 
+                      border-radius: 10px; 
+                      display: inline-block; 
+                  }
+              </style>
+          </head>
+          <body>
+              <div class="container">
+                  <h1>🚀 Deployment Successful!</h1>
+                  <p>Infrastructure deployed with Terraform</p>
+                  <p>Configured with Ansible</p>
+                  <p>Application deployed via GitHub Actions</p>
+                  <p>Build Time: $(date)</p>
+              </div>
+          </body>
+          </html>
+          EOF
+          fi
+
+      - name: Build and deploy application
+        run: |
+          # Replace $(date) with actual date in index.html
+          sed -i "s/\$(date)/$(date)/" index.html
+          
+          # Copy application files to remote server
+          scp -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no Dockerfile index.html ubuntu@${{ steps.get-ip.outputs.master_ip }}:~/
+          
+          # Build and run the application on remote server
+          ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no ubuntu@${{ steps.get-ip.outputs.master_ip }} << 'EOF'
+            # Stop and remove existing container if it exists
+            docker stop demo-app 2>/dev/null || true
+            docker rm demo-app 2>/dev/null || true
+            
+            # Build new image
+            docker build -t demo-app .
+            
+            # Run new container
+            docker run -d --name demo-app -p 80:80 demo-app
+            
+            # Show running containers
+            docker ps
+          EOF
+
+      - name: Application deployed
+        run: |
+          echo "🎉 Application deployed successfully!"
+          echo "Access your application at: http://${{ steps.get-ip.outputs.master_ip }}"
+
+  cleanup-on-failure:
+    name: Cleanup on Failure
+    runs-on: ubuntu-latest
+    needs: [deploy-infrastructure, configure-infrastructure, build-and-deploy-app]
+    if: failure() && needs.deploy-infrastructure.result == 'success'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Initialize Terraform
+        run: terraform init
+
+      - name: Destroy infrastructure on failure
+        run: terraform destroy -auto-approve

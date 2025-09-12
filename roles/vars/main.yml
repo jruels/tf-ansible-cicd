@@ -1,0 +1,4 @@
+---
+# vars file for clock
+DB: services
+SUFFIX: "halo.ninja"

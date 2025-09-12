@@ -1,0 +1,204 @@
+---
+- name: Ensure dependencies for download/unarchive
+  ansible.builtin.package:
+    name:
+      - ca-certificates
+      - tar
+      - wget
+      - curl
+    state: present
+  become: true
+
+- name: Detect architecture mapping for asset selection
+  ansible.builtin.set_fact:
+    _cri_arch_map:
+      x86_64: amd64
+      amd64: amd64
+      aarch64: arm64
+      arm64: arm64
+
+- name: Resolve normalized architecture
+  ansible.builtin.set_fact:
+    cri_dockerd_arch: "{{ _cri_arch_map.get(ansible_architecture, 'amd64') }}"
+
+- name: Discover latest release (GitHub API) when version=latest
+  when: cri_dockerd_version == "latest"
+  ansible.builtin.uri:
+    url: https://api.github.com/repos/Mirantis/cri-dockerd/releases/latest
+    method: GET
+    return_content: true
+    headers:
+      Accept: application/vnd.github+json
+    status_code: 200
+  register: _cri_latest
+  environment: "{{ cri_dockerd_proxy_env }}"
+
+- name: Set selected version tag from API or from var
+  ansible.builtin.set_fact:
+    _cri_tag: >-
+      {{ (_cri_latest.json.tag_name if cri_dockerd_version == 'latest' else cri_dockerd_version) | string }}
+
+- name: Compute plain version without leading v
+  ansible.builtin.set_fact:
+    _cri_version: "{{ _cri_tag | regex_replace('^v', '') }}"
+
+- name: Get all assets for chosen tag (works for both latest and pinned)
+  ansible.builtin.uri:
+    url: "https://api.github.com/repos/Mirantis/cri-dockerd/releases/tags/{{ _cri_tag }}"
+    method: GET
+    return_content: true
+    headers:
+      Accept: application/vnd.github+json
+    status_code: 200
+  register: _cri_tag_info
+  environment: "{{ cri_dockerd_proxy_env }}"
+
+# Deterministic asset resolution + fallback
+- name: Build deterministic asset URL (no regex)
+  ansible.builtin.set_fact:
+    cri_dockerd_asset_url_primary: >-
+      https://github.com/Mirantis/cri-dockerd/releases/download/{{ _cri_tag }}/cri-dockerd-{{ _cri_version }}.{{ cri_dockerd_arch }}.tgz
+
+- name: Probe primary asset URL (HEAD)
+  ansible.builtin.uri:
+    url: "{{ cri_dockerd_asset_url_primary }}"
+    method: HEAD
+    status_code: [200, 302]
+    return_content: false
+    headers:
+      Accept: application/octet-stream
+  register: _probe_primary
+  failed_when: false
+  changed_when: false
+  environment: "{{ cri_dockerd_proxy_env }}"
+
+- name: Use primary asset URL if it exists
+  ansible.builtin.set_fact:
+    cri_dockerd_asset_url: "{{ cri_dockerd_asset_url_primary }}"
+  when: _probe_primary.status in [200, 302]
+
+- name: "Fallback: pick asset by scanning release assets by NAME"
+  vars:
+    _assets: "{{ _cri_tag_info.json.assets | default([]) }}"
+    _name_regex: "cri-dockerd-{{ _cri_version }}\\.{{ cri_dockerd_arch }}\\.tgz$"
+  ansible.builtin.set_fact:
+    cri_dockerd_asset_url: >-
+      {{
+        (_assets
+          | selectattr('name', 'search', _name_regex)
+          | map(attribute='browser_download_url')
+          | list
+        )[0] | default('', true)
+      }}
+  when: cri_dockerd_asset_url is not defined or cri_dockerd_asset_url | length == 0
+
+- name: Fail if no matching asset found
+  ansible.builtin.fail:
+    msg: >-
+      Could not find a release asset for tag {{ _cri_tag }} (version {{ _cri_version }})
+      matching arch {{ cri_dockerd_arch }}.
+      Assets were: {{ _cri_tag_info.json.assets | map(attribute='name') | list }}
+  when: cri_dockerd_asset_url is not defined or cri_dockerd_asset_url | length == 0
+
+- name: Download cri-dockerd archive
+  ansible.builtin.get_url:
+    url: "{{ cri_dockerd_asset_url }}"
+    dest: "/tmp/cri-dockerd-{{ _cri_version }}-{{ cri_dockerd_arch }}.tar.gz"
+    mode: "0644"
+    force: true
+  environment: "{{ cri_dockerd_proxy_env }}"
+
+- name: Create staging dir
+  ansible.builtin.file:
+    path: "/tmp/cri-dockerd-{{ _cri_version }}-{{ cri_dockerd_arch }}"
+    state: directory
+    mode: "0755"
+
+- name: Unarchive cri-dockerd
+  ansible.builtin.unarchive:
+    src: "/tmp/cri-dockerd-{{ _cri_version }}-{{ cri_dockerd_arch }}.tar.gz"
+    dest: "/tmp/cri-dockerd-{{ _cri_version }}-{{ cri_dockerd_arch }}"
+    remote_src: true
+  become: true
+
+# Locate and install the real binary
+- name: "Locate cri-dockerd binary in extracted tree"
+  ansible.builtin.find:
+    paths: "/tmp/cri-dockerd-{{ _cri_version }}-{{ cri_dockerd_arch }}"
+    patterns: "^cri-dockerd$"
+    recurse: yes
+    use_regex: true
+    file_type: file
+  register: _cri_bin
+
+- name: "Fail if cri-dockerd binary not found"
+  ansible.builtin.fail:
+    msg: "cri-dockerd binary not found under /tmp/cri-dockerd-{{ _cri_version }}-{{ cri_dockerd_arch }}"
+  when: _cri_bin.matched | default(0) | int == 0
+
+- name: "Install binary to {{ cri_dockerd_bin_dir }}/cri-dockerd"
+  ansible.builtin.copy:
+    src: "{{ _cri_bin.files[0].path }}"
+    dest: "{{ cri_dockerd_bin_dir }}/cri-dockerd"
+    mode: "0755"
+    remote_src: true
+  become: true
+
+- name: Cleanup staging dir
+  ansible.builtin.file:
+    path: "/tmp/cri-dockerd-{{ _cri_version }}-{{ cri_dockerd_arch }}"
+    state: absent
+  become: true
+
+- name: Download systemd unit
+  ansible.builtin.get_url:
+    url: "{{ cri_dockerd_service_src }}"
+    dest: "/etc/systemd/system/cri-docker.service"
+    mode: "0644"
+  become: true
+  when: cri_dockerd_manage_service
+
+- name: Download systemd socket
+  ansible.builtin.get_url:
+    url: "{{ cri_dockerd_socket_src }}"
+    dest: "/etc/systemd/system/cri-docker.socket"
+    mode: "0644"
+  become: true
+  when: cri_dockerd_manage_service
+
+- name: Rewrite ExecStart to point at {{ cri_dockerd_bin_dir }}/cri-dockerd
+  ansible.builtin.replace:
+    path: /etc/systemd/system/cri-docker.service
+    regexp: '/usr/bin/cri-dockerd'
+    replace: '{{ cri_dockerd_bin_dir }}/cri-dockerd'
+  become: true
+  when: cri_dockerd_manage_service and cri_dockerd_fix_exec_path
+
+- name: systemd daemon-reload
+  ansible.builtin.systemd:
+    daemon_reload: true
+  become: true
+  when: cri_dockerd_manage_service
+  notify: Restart cri-dockerd if running
+
+- name: Enable cri-docker.service
+  ansible.builtin.systemd:
+    name: cri-docker.service
+    enabled: true
+  become: true
+  when: cri_dockerd_manage_service and cri_dockerd_enable_socket
+
+- name: Enable/Start cri-docker.socket
+  ansible.builtin.systemd:
+    name: cri-docker.socket
+    enabled: "{{ cri_dockerd_enable_socket }}"
+    state: "{{ 'started' if cri_dockerd_start_socket else 'stopped' }}"
+  become: true
+  when: cri_dockerd_manage_service
+
+- name: Assert socket is active
+  ansible.builtin.command: systemctl is-active cri-docker.socket
+  register: _socket_active
+  changed_when: false
+  failed_when: _socket_active.rc != 0
+  when: cri_dockerd_manage_service and cri_dockerd_start_socket
