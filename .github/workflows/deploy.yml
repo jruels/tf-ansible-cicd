@@ -128,12 +128,38 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Setup SSH key
+      - name: Setup SSH key for Ansible
         run: |
           mkdir -p ~/.ssh
           echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
-          ssh-keyscan -H $(echo "${{ needs.deploy-infrastructure.outputs.master_ip || needs.check-infrastructure.outputs.master_ip }}" | tr ',' '\n') >> ~/.ssh/known_hosts 2>/dev/null || true
+          
+          echo "🔍 Getting all instance IPs for SSH key scanning..."
+          
+          # Get all instance IPs (both master and workers)
+          MASTER_IP="${{ needs.deploy-infrastructure.outputs.master_ip || needs.check-infrastructure.outputs.master_ip }}"
+          WORKER_IPS="${{ needs.deploy-infrastructure.outputs.worker_ips }}"
+          
+          echo "Master IP: $MASTER_IP"
+          echo "Worker IPs: $WORKER_IPS"
+          
+          # Add master IP to known_hosts
+          if [ ! -z "$MASTER_IP" ] && [ "$MASTER_IP" != "null" ]; then
+            echo "Adding master IP to known_hosts..."
+            ssh-keyscan -H $MASTER_IP >> ~/.ssh/known_hosts 2>/dev/null || true
+          fi
+          
+          # Add worker IPs to known_hosts  
+          if [ ! -z "$WORKER_IPS" ] && [ "$WORKER_IPS" != "null" ]; then
+            echo "Adding worker IPs to known_hosts..."
+            echo "$WORKER_IPS" | tr ',' '\n' | while read ip; do
+              if [ ! -z "$ip" ]; then
+                ssh-keyscan -H $ip >> ~/.ssh/known_hosts 2>/dev/null || true
+              fi
+            done
+          fi
+          
+          echo "🔑 SSH key setup completed"
 
       - name: Debug Ansible inventory
         run: |
@@ -147,6 +173,22 @@ jobs:
       - name: Run Ansible playbook
         run: |
           echo "🚀 Running Docker installation playbook..."
+          
+          # Create Ansible configuration
+          cat > ansible.cfg << EOF
+          [defaults]
+          host_key_checking = False
+          ssh_args = -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no
+          timeout = 30
+          private_key_file = ~/.ssh/id_rsa
+          remote_user = ubuntu
+          
+          [ssh_connection]
+          ssh_args = -o ControlMaster=auto -o ControlPersist=60s -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no
+          pipelining = True
+          EOF
+          
+          # Run the playbook with better error handling
           ansible-playbook -i aws_ec2.yml docker.yml --private-key ~/.ssh/id_rsa -v
 
       - name: Wait for services to be ready

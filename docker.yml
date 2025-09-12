@@ -2,13 +2,24 @@
   hosts: tag_role_k8s_master:tag_role_k8s_member
   remote_user: ubuntu
   gather_facts: no
+  become: yes
   tasks:
-    - raw: "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y python3-minimal python3-pip"
+    - name: Wait for instances to be ready
+      wait_for_connection:
+        timeout: 300
+        delay: 5
+    
+    - name: Install Python dependencies
+      raw: "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y python3-minimal python3-pip"
+      register: python_install
+      retries: 3
+      delay: 10
 
 - name: Install Docker Prereqs
   hosts: tag_role_k8s_master:tag_role_k8s_member 
   remote_user: ubuntu
-  gather_facts: no
+  become: yes
+  gather_facts: yes
   tasks:
     - package:
         name: "{{item}}"
@@ -31,7 +42,8 @@
 - name: Install Docker
   hosts: tag_role_k8s_master:tag_role_k8s_member
   remote_user: ubuntu
-  gather_facts: no
+  become: yes
+  gather_facts: yes
   handlers:
     - name: restart docker
       service:
