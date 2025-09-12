@@ -295,4 +295,8 @@ jobs:
         run: terraform init
 
       - name: Destroy infrastructure on failure
-        run: terraform destroy -auto-approve
+        run: |
+          echo "🧹 Cleaning up failed infrastructure deployment..."
+          echo "This will destroy all resources to prevent orphaned costs"
+          terraform destroy -auto-approve
+          echo "✅ Cleanup completed"

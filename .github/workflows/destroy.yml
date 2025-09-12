@@ -1,0 +1,158 @@
+name: Destroy Infrastructure
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_destroy:
+        description: 'Type "DESTROY" to confirm infrastructure destruction'
+        required: true
+        type: string
+      environment:
+        description: 'Environment to destroy (for safety)'
+        required: true
+        type: choice
+        options:
+          - development
+          - staging
+        default: 'development'
+
+env:
+  AWS_REGION: us-west-2
+  TF_VERSION: 1.9.0
+
+jobs:
+  validate-destroy-request:
+    name: Validate Destroy Request
+    runs-on: ubuntu-latest
+    outputs:
+      proceed: ${{ steps.validate.outputs.proceed }}
+    steps:
+      - name: Validate confirmation
+        id: validate
+        run: |
+          if [ "${{ github.event.inputs.confirm_destroy }}" != "DESTROY" ]; then
+            echo "❌ Confirmation failed. You must type 'DESTROY' exactly to proceed."
+            echo "proceed=false" >> $GITHUB_OUTPUT
+            exit 1
+          else
+            echo "✅ Confirmation validated"
+            echo "proceed=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Show warning
+        run: |
+          echo "⚠️  WARNING: This will destroy ALL infrastructure resources!"
+          echo "🗂️  Environment: ${{ github.event.inputs.environment }}"
+          echo "🌍 Region: ${{ env.AWS_REGION }}"
+          echo "👤 Triggered by: ${{ github.actor }}"
+          echo ""
+          echo "📋 Resources that will be destroyed:"
+          echo "   • VPC and all networking components"
+          echo "   • EC2 instances (master and workers)"
+          echo "   • Security groups"
+          echo "   • NAT gateways and Elastic IPs"
+          echo "   • All associated costs will stop"
+
+  destroy-infrastructure:
+    name: Destroy Infrastructure
+    runs-on: ubuntu-latest
+    needs: validate-destroy-request
+    if: needs.validate-destroy-request.outputs.proceed == 'true'
+    environment: ${{ github.event.inputs.environment }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Initialize Terraform
+        run: |
+          echo "🔧 Initializing Terraform..."
+          terraform init
+
+      - name: Show current infrastructure
+        run: |
+          echo "📋 Current infrastructure state:"
+          if terraform show -json 2>/dev/null | jq -e '.values.root_module.resources | length > 0' > /dev/null; then
+            echo "✅ Infrastructure exists, proceeding with destroy"
+            echo ""
+            echo "🗂️  Resources to be destroyed:"
+            terraform show -json | jq -r '.values.root_module.resources[]? | "   • \(.type): \(.values.tags.Name // .address)"' || echo "   • Resource details unavailable"
+          else
+            echo "ℹ️  No infrastructure found to destroy"
+            exit 0
+          fi
+
+      - name: Terraform plan destroy
+        run: |
+          echo "📋 Planning infrastructure destruction..."
+          terraform plan -destroy -out=destroy.tfplan
+          echo ""
+          echo "⏰ Waiting 10 seconds before applying destroy plan..."
+          sleep 10
+
+      - name: Terraform destroy
+        run: |
+          echo "💥 Destroying infrastructure..."
+          echo "This may take 5-10 minutes..."
+          terraform apply -auto-approve destroy.tfplan
+
+      - name: Verify destruction
+        run: |
+          echo "🔍 Verifying infrastructure destruction..."
+          if terraform show -json 2>/dev/null | jq -e '.values.root_module.resources | length > 0' > /dev/null; then
+            echo "⚠️  Warning: Some resources may still exist"
+            terraform show -json | jq -r '.values.root_module.resources[]? | "   • \(.type): \(.values.tags.Name // .address)"' || echo "   • Resource details unavailable"
+          else
+            echo "✅ All infrastructure successfully destroyed"
+          fi
+
+      - name: Clean up Terraform state
+        run: |
+          echo "🧹 Cleaning up Terraform state files..."
+          rm -f terraform.tfstate*
+          rm -f destroy.tfplan
+          echo "✅ Cleanup completed"
+
+  post-destroy-summary:
+    name: Post-Destroy Summary
+    runs-on: ubuntu-latest
+    needs: [validate-destroy-request, destroy-infrastructure]
+    if: always()
+    steps:
+      - name: Destruction summary
+        run: |
+          echo "📊 Infrastructure Destruction Summary"
+          echo "===================================="
+          echo "🌍 Region: ${{ env.AWS_REGION }}"
+          echo "🗂️  Environment: ${{ github.event.inputs.environment }}"
+          echo "👤 Triggered by: ${{ github.actor }}"
+          echo "📅 Completed at: $(date)"
+          echo ""
+          
+          if [ "${{ needs.destroy-infrastructure.result }}" == "success" ]; then
+            echo "✅ Status: Infrastructure successfully destroyed"
+            echo "💰 All associated AWS costs have been stopped"
+            echo ""
+            echo "🚀 To redeploy infrastructure:"
+            echo "   1. Go to Actions tab"
+            echo "   2. Run 'Deploy Infrastructure and Application' workflow"
+          elif [ "${{ needs.validate-destroy-request.result }}" == "failure" ]; then
+            echo "❌ Status: Destroy request validation failed"
+            echo "💡 Tip: You must type 'DESTROY' exactly to confirm"
+          else
+            echo "❌ Status: Infrastructure destruction failed"
+            echo "⚠️  Some resources may still exist and incur costs"
+            echo "🔧 Manual cleanup may be required"
+          fi
