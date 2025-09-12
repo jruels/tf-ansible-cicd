@@ -52,7 +52,7 @@ jobs:
         id: terraform-output
         if: steps.check.outputs.exists == 'true'
         run: |
-          MASTER_IP=$(terraform output -raw k8s-master-public_ips 2>/dev/null | jq -r '.[0][0]' || echo "")
+          MASTER_IP=$(terraform output -json k8s-master-public_ips 2>/dev/null | jq -r '.[0]' || echo "")
           echo "master_ip=$MASTER_IP" >> $GITHUB_OUTPUT
 
   deploy-infrastructure:
@@ -92,8 +92,8 @@ jobs:
       - name: Get Terraform outputs
         id: terraform-output
         run: |
-          MASTER_IP=$(terraform output -raw k8s-master-public_ips | jq -r '.[0][0]')
-          WORKER_IPS=$(terraform output -raw k8s-node-public_ips | jq -r '.[0] | join(",")')
+          MASTER_IP=$(terraform output -json k8s-master-public_ips | jq -r '.[0]')
+          WORKER_IPS=$(terraform output -json k8s-node-public_ips | jq -r 'join(",")')
           echo "master_ip=$MASTER_IP" >> $GITHUB_OUTPUT
           echo "worker_ips=$WORKER_IPS" >> $GITHUB_OUTPUT
 

@@ -160,11 +160,11 @@ output "vpc_private_subnets" {
 ##Application outputs
 output "k8s-master-public_ips" {
   description = "Public IP addresses of Kubernetes master nodes"
-  value = [aws_instance.aws-k8s-master.*.public_ip]
+  value = aws_instance.aws-k8s-master.*.public_ip
 }
 
 output "k8s-node-public_ips" {
   description = "Public IP addresses of Kubernetes worker nodes"
-  value = [aws_instance.k8s-members.*.public_ip]
+  value = aws_instance.k8s-members.*.public_ip
 }
 
