@@ -3,7 +3,35 @@ provider "aws" {
   region = var.aws_region
 }
 
-##Create VPC using AWS VPC module
+##Data source to get available AZs dynamically
+data "aws_availability_zones" "available" {
+  state = "available"
+  
+  # Filter out AZs that might not support all instance types
+  filter {
+    name   = "opt-in-status"
+    values = ["opt-in-not-required"]
+  }
+}
+
+##Local values for dynamic AZ configuration with validation
+locals {
+  # Take first 2 available AZs, ensure we have at least 2
+  azs = length(data.aws_availability_zones.available.names) >= 2 ? slice(data.aws_availability_zones.available.names, 0, 2) : data.aws_availability_zones.available.names
+  
+  # Validate we have enough AZs
+  az_count = length(local.azs)
+}
+
+##Validation checks
+check "availability_zones" {
+  assert {
+    condition     = local.az_count >= 2
+    error_message = "At least 2 availability zones are required for this deployment. Found ${local.az_count} AZs in region ${var.aws_region}. Consider using a different region."
+  }
+}
+
+##Create VPC using AWS VPC module with dynamic AZs
 module "vpc" {
   source = "terraform-aws-modules/vpc/aws"
   version = "~> 5.0"
@@ -11,9 +39,9 @@ module "vpc" {
   name = "k8s-vpc"
   cidr = "10.0.0.0/16"
 
-  azs             = ["${var.aws_region}a", "${var.aws_region}b"]
-  public_subnets  = ["10.0.1.0/24", "10.0.2.0/24"]
-  private_subnets = ["10.0.101.0/24", "10.0.102.0/24"]
+  azs             = local.azs
+  public_subnets  = [for i in range(local.az_count) : "10.0.${i + 1}.0/24"]
+  private_subnets = [for i in range(local.az_count) : "10.0.${i + 101}.0/24"]
 
   enable_nat_gateway = true
   enable_vpn_gateway = false
@@ -108,11 +136,35 @@ resource "aws_instance" "k8s-members" {
   }
 }
 
+##Debug outputs for troubleshooting
+output "available_availability_zones" {
+  description = "All available AZs in the region"
+  value       = data.aws_availability_zones.available.names
+}
+
+output "selected_availability_zones" {
+  description = "Selected AZs for deployment"
+  value       = local.azs
+}
+
+output "vpc_public_subnets" {
+  description = "Public subnet CIDRs"
+  value       = module.vpc.public_subnets_cidr_blocks
+}
+
+output "vpc_private_subnets" {
+  description = "Private subnet CIDRs" 
+  value       = module.vpc.private_subnets_cidr_blocks
+}
+
+##Application outputs
 output "k8s-master-public_ips" {
+  description = "Public IP addresses of Kubernetes master nodes"
   value = [aws_instance.aws-k8s-master.*.public_ip]
 }
 
 output "k8s-node-public_ips" {
+  description = "Public IP addresses of Kubernetes worker nodes"
   value = [aws_instance.k8s-members.*.public_ip]
 }
 

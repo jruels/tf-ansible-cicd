@@ -67,9 +67,31 @@ variable "aws_key_name" {
 
 variable "aws_region" {
   description = "AWS region"
-  default     = "us-west-1"   # Change to your preferred region
+  default     = "us-west-2"   # Change to your preferred region
 }
 ```
+
+**Important**: The infrastructure now automatically detects available zones in any region, but your region must have at least 2 availability zones. Recommended regions:
+- `us-west-2` (4 AZs) - Default
+- `us-east-1` (6 AZs) 
+- `eu-west-1` (3 AZs)
+- `ap-southeast-1` (3 AZs)
+
+#### Step 5: Validate Your Region (Optional but Recommended)
+
+Use the included validation script to test your region:
+
+```bash
+# Test with your AWS profile and preferred region
+./check-region.sh us-west-2 student6
+```
+
+This script will:
+- ✅ Verify AWS credentials work
+- ✅ Check that the region has at least 2 availability zones  
+- ✅ Validate Terraform configuration
+- ✅ Test Ansible inventory connectivity
+- ✅ Provide specific guidance if issues are found
 
 ### Configuration Files
 
@@ -117,7 +139,7 @@ The infrastructure uses the official `terraform-aws-modules/vpc/aws` module to c
 
 ## Running the Pipeline
 
-### Step 5: Trigger the Initial Deployment
+### Step 6: Trigger the Initial Deployment
 
 1. **Push to trigger pipeline**:
    ```bash
@@ -131,7 +153,7 @@ The infrastructure uses the official `terraform-aws-modules/vpc/aws` module to c
    - Click on the "Actions" tab
    - Watch the "Deploy Infrastructure and Application" workflow
 
-### Step 6: What to Expect During Initial Run
+### Step 7: What to Expect During Initial Run
 
 The pipeline will execute these jobs in sequence:
 
@@ -162,7 +184,7 @@ The pipeline will execute these jobs in sequence:
 
 **Total initial deployment time**: ~15-20 minutes
 
-### Step 7: Access Your Application
+### Step 8: Access Your Application
 
 After successful deployment:
 
@@ -181,7 +203,7 @@ After successful deployment:
 
 ## Updating Your Application (Subsequent Runs)
 
-### Step 8: Deploy Application Updates
+### Step 9: Deploy Application Updates
 
 For subsequent deployments (after initial infrastructure is created):
 
@@ -204,13 +226,66 @@ For subsequent deployments (after initial infrastructure is created):
 
 **Total update deployment time**: ~5-7 minutes
 
-### Step 9: Pipeline Behavior Summary
+### Step 10: Pipeline Behavior Summary
 
 | Scenario | check-infrastructure | deploy-infrastructure | configure-infrastructure | build-and-deploy-app |
 |----------|---------------------|---------------------|------------------------|-------------------|
 | **First Run** | ✅ Run | ✅ Run | ✅ Run | ✅ Run |
 | **App Update** | ✅ Run | ⏭️ Skip | ✅ Run | ✅ Run |
 | **Infrastructure Destroyed** | ✅ Run | ✅ Run | ✅ Run | ✅ Run |
+
+## Error Handling & Reliability Features
+
+### **🛡️ Automatic Error Prevention**
+
+The infrastructure includes several built-in safeguards to prevent common deployment failures:
+
+#### **Dynamic Availability Zone Detection**
+- **Problem Solved**: Hard-coded AZ configurations fail in regions without those specific zones
+- **Solution**: Automatically detects and uses available AZs in any AWS region
+- **Benefit**: Deploy to any region without configuration changes
+
+#### **Region Validation**
+- **Built-in Checks**: Validates region format and AZ availability
+- **Requirements**: Ensures at least 2 availability zones exist
+- **Fallback**: Provides clear error messages with recommended regions
+
+#### **Resource Validation**
+- **Instance Limits**: Validates master (1-3) and worker (1-10) counts
+- **Network Configuration**: Automatically creates subnets based on available AZs
+- **Key Pair Validation**: Ensures SSH key exists in the specified region
+
+#### **Enhanced Debugging**
+Added debug outputs to help troubleshoot issues:
+- `available_availability_zones`: Shows all AZs detected in the region
+- `selected_availability_zones`: Shows AZs chosen for deployment
+- `vpc_public_subnets`: Lists created public subnet CIDRs
+- `vpc_private_subnets`: Lists created private subnet CIDRs
+
+### **🔧 Region Validation Tool**
+
+Use the included `check-region.sh` script before deployment:
+
+```bash
+# Make executable (first time only)
+chmod +x check-region.sh
+
+# Validate region and credentials
+./check-region.sh us-west-2 student6
+
+# Test different regions
+./check-region.sh us-east-1 student6
+./check-region.sh eu-west-1 student6
+```
+
+**The script validates**:
+- ✅ AWS credentials and profile access
+- ✅ Region has sufficient availability zones (≥2)
+- ✅ Terraform configuration syntax
+- ✅ Ansible inventory connectivity
+- ✅ Provides specific fix recommendations
+
+> **💡 Tip**: Commit this script to your repository so team members can use it for validation and troubleshooting.
 
 ## How It Works
 
@@ -297,19 +372,26 @@ Permission denied (publickey)
 
 #### 🏗️ **Infrastructure Deployment Failures**
 
-**Problem**: `deploy-infrastructure` job fails
+**Problem**: `deploy-infrastructure` job fails with AZ errors
 ```
-Error: creating EC2 Instance: UnauthorizedOperation
+Error: creating EC2 Subnet: operation error EC2: CreateSubnet, https response error StatusCode: 400
 ```
 
 **Solutions**:
-1. **Check IAM permissions**:
+1. **Use the region validation script**:
+   ```bash
+   ./check-region.sh us-west-2 student6
+   ```
+   This will automatically detect and fix AZ availability issues.
+
+2. **Check IAM permissions**:
    - Ensure IAM user has `AmazonEC2FullAccess` and `AmazonVPCFullAccess`
    - Verify AWS credentials are correct in GitHub secrets
 
-2. **Region/AZ availability**:
-   - Ensure your AWS region supports the required availability zones
-   - Some regions may not have all AZs available
+3. **Region compatibility**: 
+   - The infrastructure now auto-detects available AZs
+   - Ensure your region has at least 2 availability zones
+   - Try recommended regions: `us-west-2`, `us-east-1`, `eu-west-1`
 
 **Problem**: Terraform state conflicts
 ```
@@ -412,11 +494,50 @@ If the pipeline fails completely:
    - Delete relevant caches
 4. **Re-run the pipeline**: Push a new commit to trigger deployment
 
+### **Local Testing & Debugging**
+
+Before pushing to GitHub, test locally to catch issues early:
+
+#### **Test Terraform**
+```bash
+# Validate configuration
+AWS_PROFILE=student6 terraform validate
+
+# Check what will be created  
+AWS_PROFILE=student6 terraform plan
+
+# Test region compatibility
+./check-region.sh us-west-2 student6
+```
+
+#### **Test Ansible**
+```bash
+# Validate playbook syntax
+AWS_PROFILE=student6 ansible-playbook --syntax-check -i aws_ec2.yml docker.yml
+
+# Test inventory (after infrastructure exists)
+AWS_PROFILE=student6 ansible-inventory -i aws_ec2.yml --list
+```
+
+#### **Debug Infrastructure Issues**
+```bash
+# Check what AZs are available in your region
+AWS_PROFILE=student6 aws ec2 describe-availability-zones --region us-west-2
+
+# Verify your key pair exists
+AWS_PROFILE=student6 aws ec2 describe-key-pairs --region us-west-2
+
+# Check your AWS account limits
+AWS_PROFILE=student6 aws ec2 describe-account-attributes --region us-west-2
+```
+
 ### Getting Help
 
-1. **Check logs first**: Always review the complete job logs in GitHub Actions
-2. **AWS Console**: Verify resource states and quotas
-3. **Test SSH access**: Ensure you can manually SSH to instances with your key
+1. **Use validation tools first**: Run `./check-region.sh` to catch common issues
+2. **Check logs**: Review complete job logs in GitHub Actions
+3. **AWS Console**: Verify resource states and quotas  
+4. **Test locally**: Use `AWS_PROFILE=student6` commands above
+5. **Debug outputs**: Check Terraform outputs for AZ and subnet information
 
 ### Manual Cleanup
 If needed, manually destroy infrastructure:
