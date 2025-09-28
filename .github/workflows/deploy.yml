@@ -228,8 +228,15 @@ jobs:
       - name: Check for infrastructure changes
         id: plan
         run: |
+          set +e  # Disable exit on error temporarily
           terraform plan -detailed-exitcode -out=tfplan
-          echo "plan_exitcode=$?" >> $GITHUB_OUTPUT
+          plan_exitcode=$?
+          set -e  # Re-enable exit on error
+          echo "plan_exitcode=$plan_exitcode" >> $GITHUB_OUTPUT
+          # Only fail on exit code 1 (error), allow 0 (no changes) and 2 (changes detected)
+          if [ $plan_exitcode -eq 1 ]; then
+            exit 1
+          fi
 
       - name: Apply infrastructure updates
         if: steps.plan.outputs.plan_exitcode == '2'
