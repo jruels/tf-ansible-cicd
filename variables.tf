@@ -47,7 +47,7 @@ variable "aws_key_name" {
 #}
 
 variable "aws_instance_size" {
-  default = "t3.medium"
+  default = "t3.small"
 }
 
 variable "aws_region" {
